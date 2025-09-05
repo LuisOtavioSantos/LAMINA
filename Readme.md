@@ -207,8 +207,9 @@ Enquanto não houver arquivo `LICENSE`, considere o código “todos os direitos
 
 ```bash
 cd server/openslide_api
-py -3 -m venv venv && .\venv\Scripts\Activate.ps1
-pip install flask flask-cors pillow numpy pylibCZIrw
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip -r requirements.txt
 python app.py
 ```
 
