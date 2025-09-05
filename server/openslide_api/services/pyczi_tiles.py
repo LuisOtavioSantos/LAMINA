@@ -1,4 +1,3 @@
-# server\openslide_api\services\pyczi_tiles.py
 import logging
 from dataclasses import dataclass
 from io import BytesIO
@@ -10,8 +9,7 @@ from PIL import Image
 from pylibCZIrw import czi as pyczi
 
 logger = logging.getLogger("pyczi")
-logger.setLevel(logging.INFO)
-
+logger.setLevel(logging.DEBUG)  # deixe DEBUG enquanto investiga
 
 @dataclass(frozen=True)
 class CziInfo:
@@ -22,7 +20,6 @@ class CziInfo:
     scene: int
     origin_x: int
     origin_y: int
-
 
 def _unpack_rect(rect: Any):
     if rect is None:
@@ -37,8 +34,7 @@ def _unpack_rect(rect: Any):
         if all(k in lower for k in ("x", "y", "w", "h")):
             return (int(rect[lower["x"]]), int(rect[lower["y"]]),
                     int(rect[lower["w"]]), int(rect[lower["h"]]))
-        
-        
+        # também pode vir como {'X': (x0,x1), 'Y': (y0,y1)}
         KX = "X" if "X" in rect else ("x" if "x" in rect else None)
         KY = "Y" if "Y" in rect else ("y" if "y" in rect else None)
         if KX and KY:
@@ -47,11 +43,9 @@ def _unpack_rect(rect: Any):
             return int(x0), int(y0), int(x1 - x0), int(y1 - y0)
     raise ValueError(f"Não sei desfazer o rect: {type(rect)} -> {rect}")
 
-
 class PyCziDZ:
     """
-    Gera tiles DeepZoom on-the-fly a partir de CZI via pylibCZIrw.
-    **Importante**: o ROI por nível é calculado no espaço "reduzido" e mapeado ao full-res.
+    DeepZoom tiles a partir de CZI via pylibCZIrw, com ROI clampado ao bounds da cena.
     """
 
     def __init__(self, path: str, tile_size: int = 512, scene: int = 0):
@@ -87,7 +81,7 @@ class PyCziDZ:
             logger.info("[PyCziDZ] Cena %d -> origin=(%d,%d) size=(%d x %d)", scene, x, y, w, h)
 
         max_dim = max(w, h)
-        max_level = int(ceil(log2(max_dim)))  # níveis 0..max_level
+        max_level = int(ceil(log2(max_dim)))
         logger.info("[PyCziDZ] tile_size=%d | max_dim=%d | max_level=%d", tile_size, max_dim, max_level)
 
         self._info = CziInfo(
@@ -98,6 +92,7 @@ class PyCziDZ:
             origin_x=x, origin_y=y,
         )
 
+    # ---------- helpers ----------
     @property
     def info_dict(self) -> Dict:
         i = self._info
@@ -107,22 +102,19 @@ class PyCziDZ:
         return 2 ** (self._info.max_level - level)
 
     def _level_dims(self, level: int) -> Tuple[int, int, int]:
-        """
-        Retorna (scale, width_L, height_L) onde width_L/height_L são dimensões na
-        resolução do nível (após dividir pelo 'scale').
-        """
         scale = self._scale_at_level(level)
         wL = int(ceil(self._info.width  / float(scale)))
         hL = int(ceil(self._info.height / float(scale)))
         return scale, wL, hL
 
+    def _scene_bounds(self) -> Tuple[int, int, int, int]:
+        x0 = self._info.origin_x
+        y0 = self._info.origin_y
+        x1 = x0 + self._info.width
+        y1 = y0 + self._info.height
+        return x0, y0, x1, y1
+
     def _tile_roi_fullres(self, level: int, col: int, row: int) -> Tuple[int, int, int, int, float]:
-        """
-        Calcula ROI no full-res a partir do retângulo do tile no espaço do nível.
-        - No nível L, a imagem tem (wL x hL).
-        - O tile (col,row) cobre [u0:u1]x[v0:v1] em coords do nível.
-        - Mapeamos (u,v) -> (x,y) no full-res multiplicando por 'scale'.
-        """
         T = self._info.tile_size
         scale, wL, hL = self._level_dims(level)
 
@@ -142,12 +134,12 @@ class PyCziDZ:
         h = tile_hL * scale
         zoom = 1.0 / float(scale)
 
-        logger.debug(
-            "[ROI] L=%d col=%d row=%d | scale=%d | levelWH=(%d,%d) | u0v0=(%d,%d) u1v1=(%d,%d) | full=(%d,%d,%d,%d) | zoom=%.8f",
-            level, col, row, scale, wL, hL, u0, v0, u1, v1, x, y, w, h, zoom
-        )
+        logger.debug("[ROI(full)] L=%d col=%d row=%d | scale=%d | levelWH=(%d,%d) | "
+                     "u0v0=(%d,%d) u1v1=(%d,%d) | full=(%d,%d,%d,%d) | zoom=%.8f",
+                     level, col, row, scale, wL, hL, u0, v0, u1, v1, x, y, w, h, zoom)
         return int(x), int(y), int(w), int(h), zoom
 
+    # ---------- public ----------
     def dzi_xml(self, imgfmt: str = "jpeg") -> str:
         i = self._info
         fmt = imgfmt.lower()
@@ -161,11 +153,37 @@ class PyCziDZ:
     def tile_jpeg(self, level: int, col: int, row: int) -> BytesIO:
         x, y, w, h, zoom = self._tile_roi_fullres(level, col, row)
         if w <= 0 or h <= 0:
+            logger.debug("[tile] ROI vazio -> tile preto")
             return self._empty_tile()
 
+        # ---- clamp ao bounds da cena (evita segfault no nativo) ----
+        sx0, sy0, sx1, sy1 = self._scene_bounds()
+        rx0 = max(x, sx0)
+        ry0 = max(y, sy0)
+        rx1 = min(x + w, sx1)
+        ry1 = min(y + h, sy1)
+        w_clamp = max(0, rx1 - rx0)
+        h_clamp = max(0, ry1 - ry0)
+
+        logger.debug("[tile] full=(%d,%d,%d,%d) scene=(%d,%d,%d,%d) -> clamp=(%d,%d,%d,%d)",
+                     x, y, w, h, sx0, sy0, sx1, sy1, rx0, ry0, w_clamp, h_clamp)
+
+        if w_clamp <= 0 or h_clamp <= 0:
+            logger.debug("[tile] Fora do bounds -> tile preto")
+            return self._empty_tile()
+
+        # ---- zoom mínimo para garantir pelo menos 1x1 px de saída ----
+        min_zoom_w = 1.0 / float(max(w_clamp, 1))
+        min_zoom_h = 1.0 / float(max(h_clamp, 1))
+        zoom_safe = max(zoom, min_zoom_w, min_zoom_h)
+        if zoom_safe != zoom:
+            logger.debug("[tile] zoom ajustado: %.8f -> %.8f", zoom, zoom_safe)
+            zoom = zoom_safe
+
+        # ---- leitura segura ----
         with pyczi.open_czi(self.path) as czidoc:
             arr = czidoc.read(
-                roi=(x, y, w, h),
+                roi=(int(rx0), int(ry0), int(w_clamp), int(h_clamp)),
                 scene=self._info.scene,
                 plane={'C': 0},
                 pixel_type='Bgr24',
@@ -180,8 +198,9 @@ class PyCziDZ:
             logger.debug("[tile] shape=%s dtype=%s min=%.1f max=%.1f",
                          arr.shape, arr.dtype, float(arr.min()), float(arr.max()))
         except ValueError:
-            logger.debug("[tile] shape=%s dtype=%s (min/max indisponível)", arr.shape, arr.dtype)
+            logger.debug("[tile] shape=%s dtype=%s (sem min/max)", arr.shape, arr.dtype)
 
+        # BGR -> RGB; não redimensionar (bordas menores são OK)
         rgb = arr[..., ::-1].copy()
         img = Image.fromarray(rgb, mode="RGB")
 
@@ -209,11 +228,13 @@ class PyCziDZ:
         w = tile_wL * scale
         h = tile_hL * scale
         zoom = 1.0 / float(scale)
+        sx0, sy0, sx1, sy1 = self._scene_bounds()
         return {
             "level": level, "col": col, "row": row,
             "level_dims": {"wL": wL, "hL": hL, "scale": scale},
             "tile_level_rect": {"u0": u0, "v0": v0, "u1": u1, "v1": v1},
             "full_res_roi": {"x": x, "y": y, "w": w, "h": h},
+            "scene_bounds": {"x0": sx0, "y0": sy0, "x1": sx1, "y1": sy1},
             "zoom": zoom,
             "tile_px_nominal": self._info.tile_size,
             "origin": [self._info.origin_x, self._info.origin_y],
