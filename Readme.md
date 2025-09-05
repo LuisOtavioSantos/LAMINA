@@ -78,12 +78,12 @@ Abra um terminal em `server/openslide_api`:
 
 ```powershell
 # Windows PowerShell
-py -3 -m venv venv
+python -m venv venv
 .\venv\Scripts\Activate.ps1
 pip install -U pip
 
 # instale as libs (ex.: requirements manuais)
-pip install flask flask-cors pillow numpy pylibCZIrw
+pip install -r requirements.txt
 
 # opcional, se quiser testar OpenSlide:
 # pip install openslide-python
