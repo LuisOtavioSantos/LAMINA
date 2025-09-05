@@ -1,4 +1,4 @@
-# SIAT — Slide Image Annotation Tool
+# LAMINA — Leitor e Anotador de Microimagens e Análises
 
 Visualizador (e futura ferramenta de anotação) para **imagens de lâminas digitais**.
 Backend em Flask gera **tiles Deep Zoom on-the-fly** a partir de arquivos **CZI** (Zeiss) via `pylibCZIrw`.
